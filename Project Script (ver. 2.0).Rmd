@@ -1,0 +1,743 @@
+---
+title: "Analysis of Modeling WISP1 Binding to Collagen I Using a MCMC Method"
+output:
+  word_document: default
+  html_notebook: default
+---
+
+# Thanks and Preface
+
+This was a class project given as part of the BMEG 601 (Statistics for Biomedical Engineering) Course at West Virginia University. A special thanks is given to Dr. David Klinke, the instructor of the course, who was a great help in understanding both the math and biology behind this analysis.
+
+# Introduction and Setup
+
+The purpose of this project is to evaluate three different models proposed to see how WISP1 binds with Collagen I. The data given is not normal interaction data between the two substrates though, but rather an evaluation of self-polymerization of Collagen I in the presence of different concentrations of WISP1. Details of how this data was interpreted can be found in the report also in the GitHub Repo. Data for this project is from a paper called *The tumor cell-secreted matricellular protein WISP1 drives pro-metastatic collagen linearization* by Jia H. et. al.
+
+```{r, echo=FALSE}
+# Import Libraries
+library(dplyr)
+library(ggplot2)
+library(Bolstad2)
+library(stringr)
+library(reshape2)
+library(plotly)
+library(GGally)
+
+# Import Data
+data <- read.csv("Data.csv")
+```
+
+Before creating the models, lets understand the data a little better. I'd like to start by showing the data as is. We can see that the only pieces of data given are the WISP1 concentrations and the delay in minutes for half the monomer to be used compared to the case with no WISP.
+
+```{r}
+data
+```
+
+# Model Building
+
+There are three specific models that we want to explore in this analysis based on historical models and knowledge of how binding typically works.
+
+1.  Specific Binding
+2.  Non-Specific Binding
+3.  Combination of Specific and Non-Specific Binding
+
+The importance of evaluating each of these model's parameters will come into play for the evaluation of the likelihood functions and this section is dedicated to creating the models and likelihood functions.
+
+## Specific Binding
+
+Specific binding is a model where there are sites on the limiting agent in the reaction that are required for the substrate to adhere to in order to form an intermediate. In this model, Collagen is assumed to be the limiting agent and WISP is in excess. This can be written as follows:
+
+$$
+\frac{dComplex(t)}{dt} = k_a \cdot Collagen_{free}(t) \cdot WISP1(t) - k_d \cdot Complex(t) 
+$$
+
+We'll perform some modification on the equation about using a Collagen balance. Knowing the following:
+
+$$
+Collagen_{total} = Collagen_{free} + Complex.
+$$
+
+Substituting in this algebraic equation into our differential, we can get the following:
+
+$$
+\frac{dComplex(t)}{dt} = k_a \cdot [Collagen_{total}(t) - Complex(t)] \cdot WISP1(t) - k_d \cdot Complex(t) 
+$$
+
+Now, to simplify our model, we can assume a pseudo-steady state scenario where all of the time derivatives are 0. After this assumption and rearranging the above equation, we can get our final model:
+
+$$
+\frac{Complex}{Collagen_{total}} = \frac{k_a \cdot WISP1}{k_d + k_a \cdot WISP1} = \frac{WISP1}{\frac{k_d}{k_a} \cdot WISP1} = \frac{WISP1}{K_{SB} + WISP1}
+$$
+
+This equation then simplifies to having a single constant, KSB, which is the constant for this model. The only issue left is trying to calculate the ratio of Complex over Collagen Total (CC Ratio) from our data. WISP1 concentration is directly given from the data, but the CC Ratio must be inferred another way. The first principle in understanding this ratio is based off of the fact that it is a number bounded by 0 to 1, where 0 is where none of the collagen is bounded to WISP and 1 is where all of the Collagen is bound to WISP. The data provided and the points used for our model involve the time delay of the reaction. For this problem, I chose to create a constant, alpha, that represents there is a linear relation between the delay and ratio of complex to total monomer.
+
+$$
+Time\;Delay = \alpha \cdot \frac{WISP1}{K_{SB} + WISP1}
+$$
+
+Another consideration for this equation are the limits. Ksb and alpha must both be positive so I will be exploring the spaces in log space (specifically using natural log as a basis).  To make the numbers easier to deal with since order of magnitude can greatly vary, log likelihood will also be used.  To make the future code of the analysis work, I'll create a function that gives the likelihood of a certain set of model parameters given the data.
+
+```{r SB Likelihood}
+#Likelihood evaluation for Specific Binding
+LLH_SB <- function(theta, data){
+  # Assume first column is the WISP Concentration and second column is the time dealy
+  # For Theta, 1 is alpha and 2 is Ksb
+  Yhat <- exp(theta[1]) * (data[,1]/(data[,1] + exp(theta[2])))
+  SSE <- sum((data[,2] - Yhat)^2)
+  ni <- length(data[,1])
+  like <- log(SSE^(-ni/2))
+  return(like)
+}
+```
+
+## Non-Specific Binding
+
+For Non-Specific Binding, this foregoes the fact that there is a specific site that needs to be available on the limiting reagent (Collagen) and therefore only the total concentration of Collagen is pertinent to the reaction. The differential equation looks like the following:
+
+$$
+\frac{dComplex(t)}{dt} = \hat{k_a} \cdot Collagen_{total}(t) \cdot WISP1(t) - \hat{k_d} \cdot Complex(t) 
+$$
+
+Note that these constants are different than from the Specific Binding case. Assuming pseudo-steady state and rearranging, we can get the following equation.
+
+$$
+\frac{complex}{collagen_{total}} = \frac{\hat{k_a}}{\hat{k_d}} \cdot WISP1 = K_{NSB} \cdot WISP1
+$$
+
+After replacing the Complex to Collagen ratio with a linear time delay assumption, this becomes the following:
+
+$$
+Time\;Delay = \alpha \cdot K_{NSB} \cdot WISP1
+$$
+
+Since Alpha and KNSB are both constants being multiplied by WISP, they will be highly correlated with each other and therefore, only the combination of both will be considered (as one constant).
+
+Using the same logic as before, the likelihood evaluation would be the following:
+
+```{r}
+#Likelihood evaluation for Non Specific Binding
+LLH_NSB <- function(theta, data){
+  # Assume first column is the WISP Concentration and second column is the estimation of the Complex to Collagen Ratio
+  Yhat <- exp(theta[1])*data[,1]
+  SSE <- sum((data[,2] - Yhat)^2)
+  ni <- length(data[,1])
+  like <- log(SSE^(-ni/2))
+  return(like)
+}
+```
+
+## Combined Model
+
+For the combined model, the Specific Binding and Non-Specific Binding models are simply added together.
+
+$$
+\frac{Complex}{Collagen_{total}} = \frac{WISP1}{K_{SB\;Combined} + WISP1} + K_{NSB\;Combined} \cdot WISP1
+$$
+
+And the Likelihood is as follows:
+
+```{r}
+#Likelihood evaluation
+# for theta, 1 is alpha, 2 is Ksb, and 3 is Knsb
+LLH_Comb <- function(theta, data){
+  Yhat <- exp(theta[1]) * (exp(theta[2])*data[,1] + (data[,1]/(data[,1] + exp(theta[3]))))
+  SSE <- sum((data[,2] - Yhat)^2)
+  ni <- length(data[,1])
+  like <- log(SSE^(-ni/2))
+  return(like)
+}
+```
+
+# MCMC
+
+## Data Cleaning
+
+Not much is needed in terms of data cleaning based on the previous assumptions made, though, I wanted to mention this step here as it is typically a large part of analysis on real world data.  For now, I simply create a new data frame with the data needed for the MCMC to take place.
+
+```{r}
+test_data <- data.frame(data$WISP1..ug.mL.,data$Delay..Minutes.)
+
+test_data
+```
+
+The next step is to define the Metropolis-Hastings Algorithm implementation of MCMC for us.  The below code is an adaptation of Dr. Klinke's algorithm given to allow for more flexibility including implementing bounds and a multiplier to change the likelihood acceptance rate by either increasing (multiplier > 1) or decreasing (multiplier < 1) the differences between likelihoods.  This feature however was not implemented for the final analysis.
+
+```{r}
+#Define Metropolis-Hastings algorithm
+
+# Note: Sigma here is the standard deviation of your parameters, which is an unknown typically.
+
+MHmcmc <- function(sigma, likelihood, data, steps = 1000, target = 0.2, randomSeed = NULL, startValue = NULL, bounds = NULL, multiplier = 1) 
+{
+  if (steps < 100) {
+    warning("Function should take at least 100 steps")
+  }
+  #determine number of parameter dimensions
+  np <- length(sigma)
+  if (any(sigma <= 0)) 
+    stop("All standard deviations must be strictly non-zero and positive")
+  # save the parameter values in the Markov Chain, the scale factor, 
+  # and the likelihood evaluation
+  targetSample <- matrix(rep(0, (np+2)*steps), nrow = steps, byrow = TRUE)
+  
+  if (!is.null(randomSeed)) 
+    set.seed(randomSeed)
+  z <- rnorm(steps, 0, sigma[1])
+  if(np>1){
+    for (n in 2:np){
+        z <- cbind(z, rnorm(steps, 0, sigma[n]))
+    }
+  } else {
+    z <- as.matrix(z)
+  }
+  u <- runif(steps)
+  if (is.null(startValue)) 
+    startValue <- z[1,]
+  
+  i1 <- 1
+  nstep = 1
+  accept = 1
+  af <- accept/nstep
+  
+  g <- rep(0, steps)
+  proposal <- matrix(rep(0, np*steps), nrow = steps, byrow = TRUE)
+  alpha <- rep(0, steps)
+
+  g[1] <- likelihood(startValue, data)
+
+  targetSample[1,] <- c(startValue, af, g[1])
+  
+  for (n in 2:steps) {
+    proposal[n,] <- targetSample[i1,c(1:np)] + z[n,]
+    if (!is.null(bounds)){
+      for(i in 1:np)
+        if(bounds[[i]][[1]] > proposal[n,i] | bounds[[i]][[2]] < proposal[n,i]){
+          proposal[n,i] <- targetSample[i1,i] - z[n,i] # If outside of range, move in other direction
+          if(bounds[[i]][[1]] > proposal[n,i]){
+            proposal[n,i] <- bounds[[i]][[1]] # If still below, set to bound
+          }
+          if(bounds[[i]][[2]] < proposal[n,i]){
+            proposal[n,i] <- bounds[[i]][[2]] # If still above, set to bound
+          }
+        }
+    }
+    g[n] <- likelihood(proposal[n,], data)
+    k3 <- g[n]*multiplier
+    k4 <- g[i1]*multiplier
+    alpha[n] <- ifelse(k3 > k4, 1, exp(k3-k4))
+    if(is.na(alpha[n])){
+      print(paste("ALPHA null", i1, n, k3, k4, "prop:", proposal[n,]))
+    }
+    if (u[n] >= alpha[n]) {
+      targetSample[n,] <- targetSample[i1,]
+    }
+    else {
+      targetSample[n,] <- c(proposal[n,], af, g[n])
+      i1 <- n
+      accept <- accept + 1
+    }
+    if (nstep >= 200){
+      af <- accept/nstep
+      if (af > target){
+        z <- z * 1.01
+      } else if (af < target){
+        z <- z * 0.99
+      }
+      nstep = 0
+      accept = 0
+    } else {
+      nstep = nstep + 1
+    }
+  }
+  return(targetSample)
+}
+```
+
+For these models, Theta is the parameter values and data is the WISP concentration and time delays.
+
+Assume WISP 1 is data[,1] and time delays are data[,2].
+
+## Specific Binding Site Parameter Evaluation
+
+To evaluate all the models and make sure that the correct parameter space is being explored, four chains were used, three having random starting points and one having a value selected that is very close to the solution based on previous analyses.
+
+```{r}
+# Create some random starting points to test out chains (range -5 to 5)
+s2 <- runif(2)*10 - 5
+s3 <- runif(2)*10 - 5
+s4 <- runif(2)*10 - 5
+```
+
+```{r}
+# Run MCMC chains
+SB_results <- MHmcmc(sigma = c(0.5, 0.5), LLH_SB, test_data, steps = 40000, target = 0.2, startValue = c(3.6,1.3), bounds = list(list(-5,5),list(-5,5)), multiplier = 1)
+SB_results2 <- MHmcmc(sigma = c(0.5, 0.5), LLH_SB, test_data, steps = 40000, target = 0.2, startValue = s2, bounds = list(list(-5,5),list(-5,5)), multiplier = 1)
+SB_results3 <- MHmcmc(sigma = c(0.5, 0.5), LLH_SB, test_data, steps = 40000, target = 0.2, startValue = s3, bounds = list(list(-5,5),list(-5,5)), multiplier = 1)
+SB_results4 <- MHmcmc(sigma = c(0.5, 0.5), LLH_SB, test_data, steps = 40000, target = 0.2, startValue = s4, bounds = list(list(-5,5),list(-5,5)), multiplier = 1)
+```
+
+Next is to evaluate the results, which I'll do visually for now. The first is to determine if the chains are appropriately exploring the parameter space.  Based on literature, an acceptance rate of around 20% means that the step sizes are appropriate enough to explore the space thouroughly.
+
+```{r}
+acc_SB <- tibble("Step Number" = seq(1,nrow(SB_results)),
+                 "Chain 1" = SB_results[,3],
+                 "Chain 2" = SB_results2[,3],
+                 "Chain 3" = SB_results3[,3],
+                 "Chain 4" = SB_results4[,3]) %>%
+  melt(id.vars=c("Step Number")) %>%
+  rename("Chain" = "variable")
+
+ggplot(acc_SB, aes(x = `Step Number`, y = value, color = Chain)) +
+  geom_line() +
+  ggtitle("Acceptance Rate vs MCMC Step (Specific Binding)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0.2, color = "green") +
+  ylab("Acceptance Rate")
+```
+
+Next, lets look at the parameter values at each step and see if they converge to the same values.
+
+```{r}
+# Process data from MCMC chains for plotting.  Here we are wanting to compare the parameter values in the model.
+alphas <- tibble("Step Number" = MCstep,
+                     "Chain 1" = SB_results[,1],
+                     "Chain 2" = SB_results2[,1],
+                     "Chain 3" = SB_results3[,1],
+                     "Chain 4" = SB_results4[,1]) %>%
+    melt(id.vars=c("Step Number")) %>%
+    rename("Chain" = "variable")
+
+KSB <- tibble("Step Number" = MCstep,
+                  "Chain 1" = SB_results[,2],
+                  "Chain 2" = SB_results2[,2],
+                  "Chain 3" = SB_results3[,2],
+                  "Chain 4" = SB_results4[,2]) %>%
+  melt(id.vars=c("Step Number")) %>%
+  rename("Chain" = "variable")
+```
+
+```{r}
+# Graph the values
+SB_alpha_graph <- ggplot(alphas, aes(x = `Step Number`, y = value, color = Chain)) +
+  geom_line(alpha = 0.8) +
+  ggtitle("ln(Alpha) vs Step Number") +
+  xlab("Step Number") +
+  ylab("ln(Alpha)") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+SB_KSB_graph <- ggplot(KSB, aes(x = `Step Number`, y = value, color = Chain)) +
+  geom_line(alpha = 0.8) +
+  ggtitle("ln(KSB) vs Step Number") +
+  xlab("Step Number") +
+  ylab("ln(KSB)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+SB_alpha_graph
+SB_KSB_graph
+```
+
+```{r}
+# 3d Plot to help with preliminary understanding of how the values each effect the likelihood.
+
+plot_ly(type = "scatter3d",
+        mode = "markers",
+        x = ~SB_results[,1],
+        y = ~SB_results[,2],
+        z = ~SB_results[,4]) %>%
+layout(scene = list(
+            xaxis = list(title = "ln(Alpha)"),   # Change x/y/z axis title
+            yaxis = list(title = "ln(KSB)"),
+            zaxis = list(title = "ln(Likelihood)")))
+```
+
+The last thing to evaluate is the Gelman-Rubin Statistic which is a measure of the variance between each of the individual chains to the variance within a given chain.  The code here is surpressed because the function used from the Bolstad2 package does not have an option to surpress it's output and it clutters the document.  However, the graphs are presented.  A value under 1.1 typically represents that the chains have converged.
+
+```{r, results=FALSE, echo=FALSE}
+# Use Gelman-Rubin potential improvement statistic
+# Ratio of variance between chains / variance within chain
+
+# Combine values of each parameter for each chain
+alpha_SB <- cbind(SB_results[,1], SB_results2[,1], SB_results3[,1], SB_results4[,1])
+KSB <- cbind(SB_results[,2], SB_results2[,2], SB_results3[,2], SB_results4[,2])
+
+Xval <- seq(100, nrow(SB_results), by = 100)
+alpha_SB_GR <- rep(0, length(Xval))
+KSB_GR <- rep(0, length(Xval))
+for (i in 1:length(Xval)){
+  tmp <- GelmanRubin(alpha_SB[1:Xval[i],])
+  alpha_SB_GR[i] <- tmp$R
+  tmp <- GelmanRubin(KSB[1:Xval[i],])
+  KSB_GR[i] <- tmp$R
+}
+```
+
+```{r}
+plot(Xval, alpha_SB_GR, ty = "l", ylab = "Gelman-Rubin PSRF", col = "blue")
+  lines(Xval, KSB_GR, col = "red")
+  abline(h = 1.1, col = "green")
+  
+SB_GR_data <- tibble("Step Number" = Xval,
+           "Alpha" = alpha_SB_GR,
+           "KSB" = KSB_GR) %>%
+  melt(id.vars=c("Step Number")) %>%
+  rename("Parameter" = "variable")
+
+ggplot(SB_GR_data, aes(x = `Step Number`, y = value, color = Parameter)) +
+  geom_line() +
+  geom_hline(yintercept = 1.1, color = "green") +
+  ggtitle("Gelman-Rubin Statistic (Specific Binding)") +
+  xlab("Step Number") +
+  ylab("Gelman-Rubin Statistic") +
+  theme(plot.title = element_text(hjust = 0.5))
+  
+  
+```
+
+Finally, lets see how the parameters interact with one and other to see if there is any correlation between them.  From here we can see there is a small one from the Pearson's coefficients.
+
+```{r}
+Alpha <- c((SB_results[,1]) %>% tail(10000),
+                         (SB_results2[,1]) %>% tail(10000),
+                         (SB_results3[,1]) %>% tail(10000),
+                         (SB_results4[,1]) %>% tail(10000)
+                         )
+
+KSB <- c((SB_results[,2]) %>% tail(10000),
+                         (SB_results2[,2]) %>% tail(10000),
+                         (SB_results3[,2]) %>% tail(10000),
+                         (SB_results4[,2]) %>% tail(10000)
+                         )
+
+SB_compare <- tibble("ln(Alpha)" = Alpha,
+                     "ln(KSB)" = KSB)
+
+ggpairs(SB_compare,
+                lower = list(continuous = wrap("density")))
+```
+
+## Non-Specific Binding Sites
+
+Now, I'll repeat the same steps but for the Non-Specific Binding Model.  However, because this model only has one parameter, the likelihood graph can be shown in a single 2D graph.
+
+```{r}
+# Create some random starting points to test out chains (range -5 to 5)
+s2 <- runif(1)*10 - 5
+s3 <- runif(1)*10 - 5
+s4 <- runif(1)*10 - 5
+```
+
+```{r}
+NSB_results <- MHmcmc(sigma = c(1), LLH_NSB, test_data, steps = 40000, target = 0.2, startValue = c(-.4), bounds = list(list(-5,5)), multiplier = 1)
+NSB_results2 <- MHmcmc(sigma = c(1), LLH_NSB, test_data, steps = 40000, target = 0.2, startValue = s2, bounds = list(list(-5,5)), multiplier = 1)
+NSB_results3 <- MHmcmc(sigma = c(1), LLH_NSB, test_data, steps = 40000, target = 0.2, startValue = s3, bounds = list(list(-5,5)), multiplier = 1)
+NSB_results4 <- MHmcmc(sigma = c(1), LLH_NSB, test_data, steps = 40000, target = 0.2, startValue = s4, bounds = list(list(-5,5)), multiplier = 1)
+```
+
+Plot Results
+
+```{r}
+acc_NSB <- tibble("Step Number" = seq(1,nrow(NSB_results)),
+                 "Chain 1" = NSB_results[,2],
+                 "Chain 2" = NSB_results2[,2],
+                 "Chain 3" = NSB_results3[,2],
+                 "Chain 4" = NSB_results4[,2]) %>%
+  melt(id.vars=c("Step Number")) %>%
+  rename("Chain" = "variable")
+
+ggplot(acc_NSB, aes(x = `Step Number`, y = value, color = Chain)) +
+  geom_line() +
+  ggtitle("Acceptance Rate vs MCMC Step (Non-Specific Binding)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0.2, color = "green") +
+  ylab("Acceptance Rate")
+
+graph_2_data <- tibble("ln(Likelihood)" = NSB_results[,3],
+                           "ln(KNSB*Alpha)" = NSB_results[,1])
+
+ggplot(graph_2_data, aes(x = `ln(KNSB*Alpha)`, y = `ln(Likelihood)`)) +
+  geom_line() +
+  ggtitle("ln(Likelihood) vs ln(KNSB*Alpha)") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+```
+```{r}
+alphas_KNSB <- tibble("Step Number" = MCstep,
+                     "Chain 1" = NSB_results[,1],
+                     "Chain 2" = NSB_results2[,1],
+                     "Chain 3" = NSB_results3[,1],
+                     "Chain 4" = NSB_results4[,1]) %>%
+    melt(id.vars=c("Step Number")) %>%
+    rename("Chain" = "variable")
+
+NSB_alpha_graph <- ggplot(alphas_KNSB, aes(x = `Step Number`, y = value, color = Chain)) +
+  geom_line(alpha = 0.8) +
+  ggtitle("ln(KNSB*Alpha) vs Step Number") +
+  xlab("Step Number") +
+  ylab("ln(KNSB*Alpha)") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+NSB_alpha_graph
+```
+
+```{r, results=FALSE, echo=FALSE}
+# Use Gelman-Rubin potential improvement statistic
+# Ratio of variance between chains / variance within chain
+#
+
+KNSB <- cbind(NSB_results[,1], NSB_results2[,1], NSB_results3[,1], NSB_results4[,1])
+
+Xval <- seq(100, nrow(NSB_results), by = 100)
+KNSB_GR <- rep(0, length(Xval))
+for (i in 1:length(Xval)){
+  tmp <- GelmanRubin(KNSB[1:Xval[i],])
+  KNSB_GR[i] <- tmp$R
+}
+```
+
+```{r, results=FALSE}
+NSB_GR_data <- data.frame("Step Number" = Xval,
+           "KNSB*Alpha" = KNSB_GR) %>%
+  melt(id.vars=c("Step.Number")) %>%
+  rename("Parameter" = "variable")
+
+NSB_GR_data$Parameter <- str_replace_all(NSB_GR_data$Parameter, "[.]","*")
+
+ggplot(NSB_GR_data, aes(x = Step.Number, y = value, color = Parameter)) +
+  geom_line() +
+  geom_hline(yintercept = 1.1, color = "green") +
+  ggtitle("Gelman-Rubin Statistic (Non-Specific Binding)") +
+  xlab("Step Number") +
+  ylab("Gelman-Rubin Statistic") +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+## Combination Model
+
+And now time for the third and final model.
+
+```{r}
+# Create some random starting points to test out chains (range -5 to 5)
+s2 <- runif(3)*10 - 5
+s3 <- runif(3)*10 - 5
+s4 <- runif(3)*10 - 5
+```
+
+```{r}
+Comb_results <- MHmcmc(sigma = c(0.3, 0.3, 0.3), LLH_Comb, test_data, steps = 40000, target = 0.2, startValue = c(2.7, -3.7, -2.7), bounds = list(list(-5,5),list(-5,5),list(-5,5)), multiplier = 1)
+
+Comb_results2 <- MHmcmc(sigma = c(0.3, 0.3, 0.3), LLH_Comb, test_data, steps = 40000, target = 0.2, startValue = s2, bounds = list(list(-5,5),list(-5,5),list(-5,5)), multiplier = 1)
+
+Comb_results3 <- MHmcmc(sigma = c(0.3, 0.3, 0.3), LLH_Comb, test_data, steps = 40000, target = 0.2, startValue = s3, bounds = list(list(-5,5),list(-5,5),list(-5,5)), multiplier = 1)
+
+Comb_results4 <- MHmcmc(sigma = c(0.3, 0.3, 0.3), LLH_Comb, test_data, steps = 40000, target = 0.2, startValue = s4, bounds = list(list(-5,5),list(-5,5),list(-5,5)), multiplier = 1)
+```
+
+Plot Results
+
+```{r}
+acc_comb <- tibble("Step Number" = seq(1,nrow(Comb_results)),
+                 "Chain 1" = Comb_results[,4],
+                 "Chain 2" = Comb_results2[,4],
+                 "Chain 3" = Comb_results3[,4],
+                 "Chain 4" = Comb_results4[,4]) %>%
+  melt(id.vars=c("Step Number")) %>%
+  rename("Chain" = "variable")
+
+ggplot(acc_comb, aes(x = `Step Number`, y = value, color = Chain)) +
+  geom_line() +
+  ggtitle("Acceptance Rate vs MCMC Step (Combined)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_hline(yintercept = 0.2, color = "green") +
+  ylab("Acceptance Rate")
+```
+```{r}
+comb_alphas <- data.frame("Step Number" = MCstep,
+                     "Chain 1" = Comb_results[,1],
+                     "Chain 2" = Comb_results2[,1],
+                     "Chain 3" = Comb_results3[,1],
+                     "Chain 4" = Comb_results4[,1]) %>%
+    melt(id.vars=c("Step.Number")) %>%
+    rename("Chain" = "variable")
+
+comb_KNSB <- data.frame("Step Number" = MCstep,
+                     "Chain 1" = Comb_results[,2],
+                     "Chain 2" = Comb_results2[,2],
+                     "Chain 3" = Comb_results3[,2],
+                     "Chain 4" = Comb_results4[,2]) %>%
+    melt(id.vars=c("Step.Number")) %>%
+    rename("Chain" = "variable")
+
+comb_KSB <- data.frame("Step Number" = MCstep,
+                     "Chain 1" = Comb_results[,3],
+                     "Chain 2" = Comb_results2[,3],
+                     "Chain 3" = Comb_results3[,3],
+                     "Chain 4" = Comb_results4[,3]) %>%
+    melt(id.vars=c("Step.Number")) %>%
+    rename("Chain" = "variable")
+
+
+comb_alphas$Chain <- str_replace_all(comb_alphas$Chain, "[.]"," ")
+comb_KNSB$Chain <- str_replace_all(comb_KNSB$Chain, "[.]"," ")
+comb_KSB$Chain <- str_replace_all(comb_KSB$Chain, "[.]"," ")
+
+Comb_alpha_graph <- ggplot(comb_alphas, aes(x = Step.Number, y = value, color = Chain)) +
+  geom_line(alpha = 0.8) +
+  ggtitle("ln(Alpha) vs Step Number") +
+  xlab("Step Number") +
+  ylab("ln(Alpha)") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+Comb_KSB_graph <- ggplot(comb_KSB, aes(x = Step.Number, y = value, color = Chain)) +
+  geom_line(alpha = 0.8) +
+  ggtitle("ln(KSB Combined) vs Step Number") +
+  xlab("Step Number") +
+  ylab("ln(KSB Combined)") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+Comb_KNSB_graph <- ggplot(comb_KNSB, aes(x = Step.Number, y = value, color = Chain)) +
+  geom_line(alpha = 0.8) +
+  ggtitle("ln(KNSB Combined) vs Step Number") +
+  xlab("Step Number") +
+  ylab("ln(KNSB Combined)") +
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+Comb_alpha_graph
+Comb_KSB_graph
+Comb_KNSB_graph
+```
+
+```{r, results=FALSE, echo=FALSE}
+# Use Gelman-Rubin potential improvement statistic
+# Ratio of variance between chains / variance within chain
+#
+
+# Combine values of each parameter for each chain
+alpha_comb <- cbind(Comb_results[,1], Comb_results2[,1], Comb_results3[,1], Comb_results4[,1])
+KNSB_comb <- cbind(Comb_results[,2], Comb_results2[,2], Comb_results3[,2], Comb_results4[,2])
+KSB_comb <- cbind(Comb_results[,3], Comb_results2[,3], Comb_results3[,3], Comb_results4[,3])
+
+Xval <- seq(100, nrow(SB_results), by = 100)
+alpha_comb_GR <- rep(0, length(Xval))
+KSB_comb_GR <- rep(0, length(Xval))
+KNSB_comb_GR <- rep(0, length(Xval))
+
+for (i in 1:length(Xval)){
+  tmp <- GelmanRubin(alpha_comb[1:Xval[i],])
+  alpha_comb_GR[i] <- tmp$R
+  tmp <- GelmanRubin(KSB_comb[1:Xval[i],])
+  KSB_comb_GR[i] <- tmp$R
+  tmp <- GelmanRubin(KNSB_comb[1:Xval[i],])
+  KNSB_comb_GR[i] <- tmp$R
+}
+```
+
+```{r}
+Comb_GR_data <- data.frame("Step Number" = Xval,
+                    "Alpha" = alpha_comb_GR,
+                    "KSB" = KSB_comb_GR,
+                    "KNSB" = KNSB_comb_GR) %>%
+  melt(id.vars=c("Step.Number")) %>%
+  rename("Parameter" = "variable")
+
+ggplot(Comb_GR_data, aes(x = Step.Number, y = value, color = Parameter)) +
+  geom_line() +
+  geom_hline(yintercept = 1.1, color = "green") +
+  ggtitle("Gelman-Rubin Statistic (Combined)") +
+  xlab("Step Number") +
+  ylab("Gelman-Rubin Statistic") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ylim(0.5,3)
+```
+
+Finally, lets compare the parameter's interactions where we can see that alpha and KNSB are very correlated, which makes sense as they have to be evaluated together in the Non-Specific Binding model and have a similar relationship here.
+
+```{r}
+Alpha <- c((Comb_results[,1]) %>% tail(10000),
+                         (Comb_results2[,1]) %>% tail(10000),
+                         (Comb_results3[,1]) %>% tail(10000),
+                         (Comb_results4[,1]) %>% tail(10000)
+                         )
+
+KNSB <- c((Comb_results[,2]) %>% tail(10000),
+                         (Comb_results2[,2]) %>% tail(10000),
+                         (Comb_results3[,2]) %>% tail(10000),
+                         (Comb_results4[,2]) %>% tail(10000)
+                         )
+KSB <- c((Comb_results[,3]) %>% tail(10000),
+                         (Comb_results2[,3]) %>% tail(10000),
+                         (Comb_results3[,3]) %>% tail(10000),
+                         (Comb_results4[,3]) %>% tail(10000)
+                         )
+
+Comb_compare <- tibble("ln(Alpha)" = Alpha,
+                     "ln(KSB)" = KSB,
+                     "ln(KNSB)" = KNSB)
+
+ggpairs(Comb_compare,
+        lower = list(continuous = wrap("density")))
+```
+
+# Model Comparison: Bayes Factor
+
+The Bayes Factor was used as a method of evaluating the models.  Assuming the errors are normally distributed, an Approximate Bayesian Computation was used to calculated the ratios, which compares the inverse of the Sum Squared Errors of the models against each other.
+
+## Calculate the Bayes Factor
+The Bayes Factor is calculated here taking the last 10,000 of the 40,000 steps in each MCMC chain.  Based on the analysis at the time of submission of this work, this gives ample burn in for all models to compare the areas being explored.
+
+```{r}
+SB_Bayes_Factor <- rbind(exp(SB_results[,4]) %>% tail(10000),
+                         exp(SB_results2[,4]) %>% tail(10000),
+                         exp(SB_results3[,4]) %>% tail(10000),
+                         exp(SB_results4[,4]) %>% tail(10000)
+                         ) %>%
+  mean()
+
+NSB_Bayes_Factor <- rbind(exp(NSB_results[,3]) %>% tail(10000),
+                          exp(NSB_results2[,3]) %>% tail(10000),
+                          exp(NSB_results3[,3]) %>% tail(10000),
+                          exp(NSB_results4[,3]) %>% tail(10000)
+                          ) %>%
+  mean()
+
+comb_Bayes_Factor <- rbind(exp(Comb_results[,5]) %>% tail(10000),
+                          exp(Comb_results2[,5]) %>% tail(10000),
+                          exp(Comb_results3[,5]) %>% tail(10000),
+                          exp(Comb_results4[,5]) %>% tail(10000)
+                          ) %>%
+  mean()
+```
+
+```{r}
+print("Bayes Factor (SB/NSB)")
+(SB_Bayes_Factor / NSB_Bayes_Factor)^(1/15)
+print("Bayes Factor (SB/Comb)")
+(SB_Bayes_Factor / comb_Bayes_Factor)^(1/15)
+print("Bayes Factor (NSB/Comb)")
+(NSB_Bayes_Factor / comb_Bayes_Factor)^(1/15)
+```
+
+# Evaluation of Max Likelihood parameters
+
+```{r}
+WISP_test <- seq(0,100)
+SB_Calc <- exp(SB_max_param[1]) * (WISP_test/(WISP_test + exp(SB_max_param[2])))
+NSB_Calc <- exp(NSB_max_param[1])*WISP_test
+Comb_Calc <- exp(Comb_max_param[1]) * (exp(Comb_max_param[2])*WISP_test + (WISP_test/(WISP_test + exp(Comb_max_param[3]))))
+Finals <- data.frame(WISP_test, SB_Calc, NSB_Calc, Comb_Calc) %>%
+  rename("Specific Binding" = "SB_Calc", "Non-Specific Binding" = "NSB_Calc", "Combined" = "Comb_Calc") %>%
+  reshape(varying = c("Specific Binding", "Non-Specific Binding", "Combined"),
+          v.names = "Time Delay (Minutes)",
+          timevar = "Model",
+          times = c("Specific Binding", "Non-Specific Binding", "Combined"),
+          direction = "long")
+  
+```
+
+This graph compares the model results more visually and it can be seen that the Combined Model is the best option given the data.
+
+```{r}
+ggplot(Finals) +
+  geom_line(aes(x = WISP_test, y = `Time Delay (Minutes)`, color = Model)) +
+  geom_point(data = data, mapping = aes(x = WISP1..ug.mL., y = Delay..Minutes.)) +
+  ggtitle("Model Comparison with Data") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("WISP1 Concentration (ug/mL)")
+```
